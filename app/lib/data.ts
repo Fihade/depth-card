@@ -79,4 +79,9 @@ export const photos = {
       y: 0.054,
     },
   },
+
+  "uploaded": {
+    src: "",
+    depthSrc: "",
+  },
 } as const;
