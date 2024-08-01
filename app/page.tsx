@@ -451,7 +451,7 @@ export default function Home() {
 
 
       {/* 新增的上传部分 */}
-      <div className="fixed bottom-4 left-4 bg-white p-4 rounded shadow-lg">
+      <div className="fixed bottom-4 left-4 bg-transparent">
         <h2 className="text-lg font-bold mb-2">Upload Images</h2>
         <div className="mb-2">
           <label htmlFor="originalImage" className="block mb-1">Original Image:</label>
