@@ -449,7 +449,7 @@ export default function Home() {
         </Select>
       </div>
       <SidebarLayer layers={photoDepthMap} />
-
+      <Analytics />
 
       {/* 新增的上传部分 */}
       <div className="fixed bottom-4 left-4 bg-transparent">
