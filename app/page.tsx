@@ -3,6 +3,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { photos } from "./lib/data";
+import { Analytics } from "@vercel/analytics/react"
 
 import {
   Select,
