@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/select";
 
 import { depthSlicer } from "./lib/slice";
+import { generateDepthDataUrlInBrowser, isWebGpuAvailable } from "./lib/depth-webgpu";
 
 const CSS_PERSPECTIVE = 980;
 
@@ -35,6 +36,23 @@ const DEFAULT_PHOTO = "card1";
 
 const LOCK_CURSOR_TIME = 128;
 const SNAP_TIME = 650;
+const REQUEST_TIMEOUT_MS = 45_000;
+const MAX_RETRIES = 2;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise
+      .then((value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      })
+      .catch((error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+  });
+}
 
 export default function Home() {
   const dataRef = useRef({
@@ -57,11 +75,13 @@ export default function Home() {
     spread: DEFAULT_SPREAD,
   });
 
-  // 新增状态用于存储上传的图片
+  // 上传与自动生成深度图状态
   const [originalImage, setOriginalImage] = useState<File | null>(null);
-  const [depthImage, setDepthImage] = useState<File | null>(null);
   const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
   const [uploadedDepthUrl, setUploadedDepthUrl] = useState<string | null>(null);
+  const [isGeneratingDepth, setIsGeneratingDepth] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
 
 
   function set(
@@ -80,28 +100,110 @@ export default function Home() {
     }
   };
 
-  const handleDepthImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setDepthImage(e.target.files[0]);
+  const generateDepthFromServerWithRetry = async (image: File) => {
+    let lastError = "服务端生成失败，请稍后重试。";
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+      try {
+        const formData = new FormData();
+        formData.append("image", image);
+
+        const response = await fetch("/api/depth", {
+          method: "POST",
+          body: formData,
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          let errorMessage = "服务端生成失败，请重试。";
+          if (response.status === 504) {
+            errorMessage = "服务端生成超时，请点击重试。";
+          } else if (response.status >= 500) {
+            errorMessage = "服务端暂时不可用，请稍后再试。";
+          }
+
+          try {
+            const errorPayload = await response.json();
+            if (errorPayload?.error) {
+              errorMessage = `${errorMessage}（${String(errorPayload.error)}）`;
+            }
+          } catch {
+            const errorText = await response.text();
+            if (errorText) {
+              errorMessage = errorText;
+            }
+          }
+
+          lastError = errorMessage;
+          continue;
+        }
+
+        const payload = await response.json();
+        const depthSrc = payload.depthDataUrl || payload.depthUrl;
+        if (!depthSrc) {
+          lastError = "服务端深度图返回为空，请重试。";
+          continue;
+        }
+
+        return depthSrc as string;
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+          lastError = "服务端请求超时（45秒），请点击重试。";
+        } else {
+          lastError = "服务端网络异常，请检查网络后重试。";
+        }
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      setRetryCount(attempt + 1);
+    }
+
+    throw new Error(lastError);
+  };
+
+  const generateDepthWithRetry = async (image: File) => {
+    try {
+      if (!isWebGpuAvailable()) {
+        throw new Error("当前浏览器不支持 WebGPU");
+      }
+
+      return await withTimeout(
+        generateDepthDataUrlInBrowser(image),
+        REQUEST_TIMEOUT_MS,
+        "WebGPU 生成超时（45秒）"
+      );
+    } catch (webGpuError) {
+      console.warn("WebGPU depth generation failed, fallback to server", webGpuError);
+      return generateDepthFromServerWithRetry(image);
     }
   };
 
-  const handleUpload = () => {
-    if (originalImage && depthImage) {
+  const handleUpload = async () => {
+    if (!originalImage) {
+      alert("请先上传原图");
+      return;
+    }
+
+    setIsGeneratingDepth(true);
+    setUploadError(null);
+    setRetryCount(0);
+
+    try {
       const originalUrl = URL.createObjectURL(originalImage);
-      const depthUrl = URL.createObjectURL(depthImage);
-      
       setUploadedImageUrl(originalUrl);
-      setUploadedDepthUrl(depthUrl);
-      setPhoto('uploaded');
-      
-      console.log('Original Image URL:', originalUrl);
-      console.log('Depth Image URL:', depthUrl);
-      
-      // 触发深度图片处理
-      updateDepthLayers(depthUrl);
-    } else {
-      alert('Please upload both images');
+
+      const depthSrc = await generateDepthWithRetry(originalImage);
+
+      setUploadedDepthUrl(depthSrc);
+      setPhoto("uploaded");
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : "生成失败，请重试。");
+    } finally {
+      setIsGeneratingDepth(false);
     }
   };
 
@@ -451,9 +553,9 @@ export default function Home() {
       <SidebarLayer layers={photoDepthMap} />
       <Analytics />
 
-      {/* 新增的上传部分 */}
+      {/* 上传部分：只上传原图，服务端自动生成深度图 */}
       <div className="fixed bottom-4 left-4 bg-transparent">
-        <h2 className="text-lg font-bold mb-2">Upload Images</h2>
+        <h2 className="text-lg font-bold mb-2">Upload Image</h2>
         <div className="mb-2">
           <label htmlFor="originalImage" className="block mb-1">Original Image:</label>
           <input
@@ -464,27 +566,24 @@ export default function Home() {
             className="w-full"
           />
         </div>
-        {/* https://huggingface.co/spaces/depth-anything/Depth-Anything-V2 */}
-        <div className="mb-2">
-          <label htmlFor="depthImage" className="block mb-1">Depth Image:</label>
-          <input
-            type="file"
-            id="depthImage"
-            accept="image/*"
-            onChange={handleDepthImageUpload}
-            className="w-full"
-          />
-          <span className="text-sm text-gray-600 italic">
-  {"You can get GrayScale depth map from "}
-  <a className="underline" href="https://depth-anything-v2.github.io/">Depth Anything V2</a>
-</span>
-        </div>
+        <span className="text-sm text-gray-600 italic block mb-2">
+          优先使用 WebGPU 本地生成；失败时自动回退服务端（Replicate/fal）。
+        </span>
+        {uploadError && (
+          <p className="text-sm text-red-500 mb-1">{uploadError}</p>
+        )}
+        {retryCount > 0 && (
+          <p className="text-xs text-amber-600 mb-2">
+            已自动重试 {retryCount} 次
+          </p>
+        )}
         <button
           onClick={handleUpload}
+          disabled={isGeneratingDepth}
           style={{ backgroundColor: '#00d157' }}
-          className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded"
+          className="bg-blue-500 hover:bg-blue-700 disabled:opacity-60 text-white font-bold py-2 px-4 rounded"
         >
-          Depth it！
+          {isGeneratingDepth ? "生成中..." : uploadError ? "重试生成" : "生成景深"}
         </button>
       </div>
 
